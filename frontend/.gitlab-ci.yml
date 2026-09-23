@@ -1,0 +1,139 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        BUILD_SH: ""
+    - if: $CI_COMMIT_MESSAGE =~ /\[cr\]/
+      variables:
+        BUILD_SH: ""
+    - if: $CI_COMMIT_BRANCH == "daily"
+      variables:
+        BUILD_SH: "daily"
+    - if: $CI_COMMIT_BRANCH =~ /^release\/.*$/
+      variables:
+        BUILD_SH: "pre"
+    - if: $CI_COMMIT_BRANCH =~ /^hotfix\/.*$/
+      variables:
+        BUILD_SH: "pre"
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        BUILD_SH: "prod"
+
+variables:
+  DOCKER_PASSWORD: $DOCKER_PASSWORD
+  SERVICE_NAME: "service-name"
+  BUILD_SH:
+    value: "daily"
+    description: "选择部署环境"
+    options:
+      - "daily"
+      - "pre"
+      - "prod"
+
+before_script:
+  - whoami
+  - nvm use v22
+  - corepack enable
+  - git clone --depth 1 https://gitlab-ci-token:${GITLAB_BACKEND_CLONE_TOKEN}@github.molardata.com/backend/build-deploy-project.git
+  - cp -r build-deploy-project/dino/service-name/deploy ./
+
+stages:
+  - build
+  - deploy
+  - cleanup
+
+build_job:
+  stage: build
+  rules:
+    - if: $BUILD_SH == "daily" || $BUILD_SH == "pre" || $BUILD_SH == "prod"
+  script:
+    - TIMESTAMP=$(date +%Y%m%d%H%M)
+    - echo "TIMESTAMP=${TIMESTAMP}" > timestamp.env
+    - echo "$TIMESTAMP"
+    - echo "----------------------------------------"
+    - echo "执行的环境变量为： ${BUILD_SH}"
+    - echo "----------------------------------------"
+    - |
+      case "$BUILD_SH" in
+        daily)
+          BUILD_SCRIPT="./build/build_daily.sh"
+          ;;
+        pre|prod)
+          BUILD_SCRIPT="./build/build_pre_prod.sh"
+          ;;
+        *)
+          echo "Unsupported BUILD_SH: ${BUILD_SH}"
+          exit 1
+          ;;
+      esac
+
+      if [ ! -f "$BUILD_SCRIPT" ]; then
+        echo "Build script not found: ${BUILD_SCRIPT}"
+        exit 1
+      fi
+
+      sh "$BUILD_SCRIPT" "$TIMESTAMP"
+  artifacts:
+    when: always
+    paths:
+      - timestamp.env
+
+deploy_daily_job:
+  stage: deploy
+  dependencies: [build_job]
+  rules:
+    - if: $BUILD_SH == "daily"
+  script:
+    - TIMESTAMP=$(grep TIMESTAMP timestamp.env | cut -d= -f2)
+    - sh ./deploy/daily/deploy.sh "$TIMESTAMP" "$CI_COMMIT_REF_NAME"
+    - |
+      curl -k -X POST "${ARGOCD_DIR}/volc-daily-${SERVICE_NAME}/sync" \
+        -H "Authorization: Bearer $ARGOCD_TOKEN" \
+        -H "Content-Type: application/json"
+
+deploy_pre_job:
+  stage: deploy
+  dependencies: [build_job]
+  rules:
+    - if: $BUILD_SH == "pre"
+  script:
+    - TIMESTAMP=$(grep TIMESTAMP timestamp.env | cut -d= -f2)
+    - sh ./deploy/pre/deploy.sh "$TIMESTAMP" "$CI_COMMIT_REF_NAME"
+    - |
+      curl -k -X POST "${ARGOCD_DIR}/aws-pre-${SERVICE_NAME}/sync" \
+        -H "Authorization: Bearer $ARGOCD_TOKEN" \
+        -H "Content-Type: application/json"
+
+deploy_prod_job:
+  stage: deploy
+  dependencies: [build_job]
+  rules:
+    - if: $BUILD_SH == "prod"
+  script:
+    - TIMESTAMP=$(grep TIMESTAMP timestamp.env | cut -d= -f2)
+    - sh ./deploy/prod/deploy.sh "$TIMESTAMP" "$CI_COMMIT_REF_NAME"
+
+cleanup_job:
+  stage: cleanup
+  dependencies:
+    - build_job
+  rules:
+    - if: $BUILD_SH == "daily" || $BUILD_SH == "pre" || $BUILD_SH == "prod"
+  script:
+    - |
+      if [ -f timestamp.env ]; then
+        TIMESTAMP=$(grep TIMESTAMP timestamp.env | cut -d= -f2)
+      else
+        echo "timestamp.env not found, skip docker image cleanup"
+        exit 0
+      fi
+
+      echo "Cleaning up images for ${SERVICE_NAME} with timestamp ${TIMESTAMP}"
+
+      if [ -n "$TIMESTAMP" ]; then
+        docker rmi "${SERVICE_NAME}:${TIMESTAMP}" || true
+        docker rmi "docker-hub.molardata.com/daily/${SERVICE_NAME}:${TIMESTAMP}" || true
+        docker rmi "docker-hub.molardata.com/production/${SERVICE_NAME}:${TIMESTAMP}" || true
+      fi
+  when: always
