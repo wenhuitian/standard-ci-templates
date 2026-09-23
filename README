@@ -1,0 +1,6 @@
+#使用模版注意事项
+1.项目组改造需要提前将所有服务和镜像确认对应规范名字；
+2.所有环境推送镜像规范，daily测试环境推送到daily仓库，pre预发，prod线上环境推送到production仓库；
+3. 禁止 docker login xxx -u 个人账号 -p 明文密码 ,禁止不写 login 依赖 Runner 全局登录;
+5.docker login -u ${DOCKER_ACCOUNT} -p ${DOCKER_PASSWORD} ${DOCKER_REG}， ${DOCKER_ACCOUNT} / ${DOCKER_PASSWORD} / ${DOCKER_REG} 变量为全局变量不需要项目改动
+6.git clone --depth 1 https://gitlab-ci-token:${GITLAB_BACKEND_CLONE_TOKEN}@github.molardata.com/backend/build-deploy-project.git，，${GITLAB_BACKEND_CLONE_TOKEN}变量为全局变量不需要项目改动；
